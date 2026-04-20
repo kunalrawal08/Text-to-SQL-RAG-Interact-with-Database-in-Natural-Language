@@ -1,0 +1,32 @@
+# Core
+streamlit
+langchain
+langchain-core
+langchain-google-genai
+google-generativeai
+python-dotenv
+
+# Database
+psycopg2-binary
+SQLAlchemy
+pandas
+openpyxl
+
+# Vector Store
+chromadb
+langchain-community
+
+# Notebooks
+jupyter
+notebook
+
+streamlit
+google-generativeai
+python-dotenv
+langchain
+PyPDF2
+chromadb
+faiss-cpu
+pdf2image
+pandas
+langchain-groq

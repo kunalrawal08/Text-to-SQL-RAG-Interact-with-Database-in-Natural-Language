@@ -1,0 +1,9 @@
+[theme]
+base = "light"
+primaryColor = "#ea580c"
+
+[client]
+toolbarMode = "minimal"
+
+[logger]
+level = "error"

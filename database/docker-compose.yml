@@ -1,0 +1,21 @@
+version: '3.8'
+
+services:
+  db:
+    image: postgres:16
+    container_name: powerlifting_postgres_db
+    restart: always
+    environment:
+      # Hardcoding these prevents the "password not specified" error
+      POSTGRES_USER: POWERLIFTER_KUNAL
+      POSTGRES_PASSWORD: Kunal123
+      POSTGRES_DB: powerlifting_db
+    ports:
+      # Maps your local port 2003 to the container's 5432
+      - "2003:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+volumes:
+  postgres_data:
+    driver: local
