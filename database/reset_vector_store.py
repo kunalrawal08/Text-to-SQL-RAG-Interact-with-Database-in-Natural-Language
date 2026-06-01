@@ -19,12 +19,12 @@ def get_all_schemas():
     """
     load_dotenv()
     
-    db_user = os.getenv("DB_USER")
-    db_password = os.getenv("DB_PASSWORD")
-    db_host = os.getenv("DB_HOST")
-    db_port = os.getenv("DB_PORT")
-    db_name = os.getenv("DB_NAME")
-    db_url = f"postgresql://{db_user}:{db_password}@{db_host}:{db_port}/{db_name}"
+    # Check for Docker DB_URL first (enterprise deployment)
+    # Fall back to constructing from individual env vars for local development
+    db_url = os.getenv(
+        "DB_URL",
+        f"postgresql://{os.getenv('DB_USER', 'POWERLIFTER_KUNAL')}:{os.getenv('DB_PASSWORD', 'Kunal123')}@{os.getenv('DB_HOST', 'localhost')}:{os.getenv('DB_PORT', '2003')}/{os.getenv('DB_NAME', 'powerlifting_db')}"
+    )
     
     engine = create_engine(db_url)
     db_inspector = inspect(engine)

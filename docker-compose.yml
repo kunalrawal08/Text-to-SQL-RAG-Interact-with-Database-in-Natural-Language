@@ -13,6 +13,24 @@ services:
       - "2003:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U POWERLIFTER_KUNAL -d powerlifting_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  init:
+    build:
+      context: .
+      dockerfile: Dockerfile.init
+    container_name: powerlift_init
+    environment:
+      - DB_URL=postgresql://POWERLIFTER_KUNAL:Kunal123@db:5432/powerlifting_db
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      - ./data/raw:/app/data/raw
 
   api:
     build: 
@@ -28,7 +46,7 @@ services:
       # Make sure your container gets your Groq API key (assuming you use a .env file)
       - GROQ_API_KEY=${GROQ_API_KEY}
     depends_on:
-      - db
+      - init
 
   ui:
     build:
@@ -41,8 +59,12 @@ services:
     environment:
       # Internal networking: talks directly to the 'api' service
       - API_BASE_URL=http://api:8080/api
+      # Internal networking: talks directly to the database
+      - DB_URL=postgresql://POWERLIFTER_KUNAL:Kunal123@db:5432/powerlifting_db
+      - GROQ_API_KEY=${GROQ_API_KEY}
+      - GOOGLE_API_KEY=${GOOGLE_API_KEY}
     depends_on:
-      - api
+      - init
 
 volumes:
   postgres_data:

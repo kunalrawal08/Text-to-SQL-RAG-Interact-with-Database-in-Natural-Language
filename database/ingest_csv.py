@@ -6,7 +6,7 @@ Enforces a "Data Contract" for reliable Text-to-SQL operations
 import os
 import pandas as pd
 import logging
-from sqlalchemy import create_engine, inspect
+from sqlalchemy import create_engine, inspect, text
 from dotenv import load_dotenv
 from typing import Tuple, List, Dict
 
@@ -18,12 +18,12 @@ logger = logging.getLogger(__name__)
 load_dotenv()
 
 # --- Database Connection ---
-db_user = os.getenv("DB_USER")
-db_password = os.getenv("DB_PASSWORD")
-db_host = os.getenv("DB_HOST")
-db_port = os.getenv("DB_PORT")
-db_name = os.getenv("DB_NAME")
-db_url = f"postgresql://{db_user}:{db_password}@{db_host}:{db_port}/{db_name}"
+# Check for Docker DB_URL first (enterprise deployment)
+# Fall back to constructing from individual env vars for local development
+db_url = os.getenv(
+    "DB_URL",
+    f"postgresql://{os.getenv('DB_USER', 'POWERLIFTER_KUNAL')}:{os.getenv('DB_PASSWORD', 'Kunal123')}@{os.getenv('DB_HOST', 'localhost')}:{os.getenv('DB_PORT', '2003')}/{os.getenv('DB_NAME', 'powerlifting_db')}"
+)
 
 
 def validate_csv(df: pd.DataFrame, filename: str) -> Tuple[bool, List[str], Dict[str, str]]:
@@ -99,7 +99,7 @@ def validate_csv(df: pd.DataFrame, filename: str) -> Tuple[bool, List[str], Dict
                 lost_ratio = converted.isna().sum() / len(non_null)
                 if lost_ratio > 0.2:
                     type_issues.append(f"Column '{col}' looks numeric but {lost_ratio*100:.0f}% values are non-numeric")
-            except:
+            except Exception:
                 type_issues.append(f"Column '{col}' appears numeric but contains non-numeric values")
     
     if type_issues:
@@ -128,7 +128,7 @@ def validate_csv(df: pd.DataFrame, filename: str) -> Tuple[bool, List[str], Dict
                 iso_ratio = iso_count / len(non_null)
                 if iso_ratio < 0.7:
                     date_issues.append(f"Column '{col}' may not be in ISO 8601 format (YYYY-MM-DD)")
-        except Exception as e:
+        except Exception:
             date_issues.append(f"Column '{col}' has unparseable dates")
     
     if date_issues:
@@ -165,14 +165,22 @@ def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def ingest_csv_to_postgres(df: pd.DataFrame, table_name: str, if_exists: str = 'append') -> Tuple[bool, str, int]:
+def ingest_csv_to_postgres(
+    df: pd.DataFrame, 
+    table_name: str, 
+    if_exists: str = 'append',
+    original_filename: str = None,
+    sheet_name: str = 'Main'
+) -> Tuple[bool, str, int]:
     """
-    Ingest validated DataFrame into PostgreSQL.
+    Ingest validated DataFrame into PostgreSQL with registry tracking.
     
     Args:
         df: DataFrame to ingest
         table_name: Target table name (will be created if not exists)
         if_exists: 'replace', 'append', or 'fail'
+        original_filename: Original filename for registry (e.g., 'Sales.xlsx')
+        sheet_name: Sheet name for registry (default 'Main')
     
     Returns: (success: bool, message: str, rows_ingested: int)
     """
@@ -181,7 +189,7 @@ def ingest_csv_to_postgres(df: pd.DataFrame, table_name: str, if_exists: str = '
         df = normalize_columns(df)
         
         # Connect to database
-        logger.info(f"Connecting to PostgreSQL at {db_host}:{db_port}/{db_name}")
+        logger.info("Connecting to PostgreSQL...")
         engine = create_engine(db_url)
         
         # Test connection
@@ -200,12 +208,62 @@ def ingest_csv_to_postgres(df: pd.DataFrame, table_name: str, if_exists: str = '
         )
         
         logger.info(f"✅ Successfully ingested {len(df)} rows into '{table_name}'")
+        
+        # Register this ingestion in the file_registry (if metadata provided)
+        if original_filename:
+            try:
+                from database.get_schema import init_file_registry
+                init_file_registry(engine)
+                
+                with engine.begin() as conn:
+                    conn.execute(text("""
+                        INSERT INTO file_registry (original_filename, sheet_name, db_table_name)
+                        VALUES (:filename, :sheet, :table)
+                        ON CONFLICT (db_table_name) DO UPDATE
+                        SET original_filename = :filename, sheet_name = :sheet
+                    """), {
+                        'filename': original_filename,
+                        'sheet': sheet_name,
+                        'table': table_name
+                    })
+                logger.info(f"✓ Registry updated: {original_filename} - {sheet_name} → {table_name}")
+            except Exception as e:
+                logger.warning(f"Registry update failed (non-critical): {e}")
+        
         return True, f"✅ Ingested {len(df):,} rows into table '{table_name}'", len(df)
     
     except Exception as e:
         error_msg = f"Ingestion failed: {str(e)}"
         logger.error(error_msg)
         return False, error_msg, 0
+
+
+def register_file_ingestion(original_filename: str, sheet_name: str, db_table_name: str) -> bool:
+    """
+    Standalone function to register a file ingestion in the registry.
+    Useful for post-ingestion registration or batch operations.
+    """
+    try:
+        from database.get_schema import init_file_registry
+        engine = create_engine(db_url)
+        init_file_registry(engine)
+        
+        with engine.begin() as conn:
+            conn.execute(text("""
+                INSERT INTO file_registry (original_filename, sheet_name, db_table_name)
+                VALUES (:filename, :sheet, :table)
+                ON CONFLICT (db_table_name) DO UPDATE
+                SET original_filename = :filename, sheet_name = :sheet
+            """), {
+                'filename': original_filename,
+                'sheet': sheet_name,
+                'table': db_table_name
+            })
+        logger.info(f"✓ Registered: {original_filename} - {sheet_name} → {db_table_name}")
+        return True
+    except Exception as e:
+        logger.error(f"Failed to register file: {e}")
+        return False
 
 
 def get_existing_tables() -> List[str]:

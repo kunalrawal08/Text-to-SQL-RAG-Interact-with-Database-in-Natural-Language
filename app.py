@@ -10,6 +10,7 @@ load_dotenv()
 import streamlit as st
 import os
 import pandas as pd
+import requests
 import re
 import time
 import json
@@ -26,6 +27,9 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded",
 )
+
+# ── FastAPI Backend Configuration ──────────────────────────────────────────────
+API_BASE_URL = os.getenv("API_BASE_URL", "http://localhost:8080/api")
 
 # ── Load CSS ───────────────────────────────────────────────────────────────────
 # CSS loading DISABLED - using Streamlit-only components per user request
@@ -174,19 +178,82 @@ Do NOT mention SQL, databases, tuples, or technical details. Be direct and human
     
     return response.content, metrics
 
+def get_executive_summary(question, query_results):
+    """Generate 2-sentence business summary. Lightweight, optional feature."""
+    try:
+        llm = ChatGroq(
+            groq_api_key=os.getenv("GROQ_API_KEY"),
+            model_name="llama-3.3-70b-versatile",
+            temperature=0
+        )
+        
+        # Format results for summary
+        if isinstance(query_results, list):
+            formatted_results = "\n".join([str(row) for row in query_results[:10]])
+        else:
+            formatted_results = str(query_results)
+        
+        system_prompt = f"""You are a business intelligence analyst for powerlifting data.
+Question: "{question}"
+Data: {formatted_results}
+
+Write EXACTLY 2 sentences summarizing the key business insight.
+Focus on trends, patterns, or key metrics. Be quantitative and avoid jargon."""
+        
+        start_time = time.time()
+        response = llm.invoke([HumanMessage(content=system_prompt)])
+        latency = time.time() - start_time
+        
+        return response.content, latency
+    except Exception as e:
+        return None, 0  # Graceful degradation
+
 def get_dynamic_schema():
-    """Fetch the actual database schema from PostgreSQL."""
-    db_user = os.getenv("DB_USER")
-    db_password = os.getenv("DB_PASSWORD")
-    db_host = os.getenv("DB_HOST")
-    db_port = os.getenv("DB_PORT")
-    db_name = os.getenv("DB_NAME")
-    db_url = f"postgresql://{db_user}:{db_password}@{db_host}:{db_port}/{db_name}"
+    """Fetch the actual database schema from PostgreSQL dynamically based on active table."""
+    db_url = os.getenv("DB_URL", "postgresql://POWERLIFTER_KUNAL:Kunal123@localhost:2003/powerlifting_db")
     
     engine = create_engine(db_url)
     db_inspector = inspect(engine)
-    columns = db_inspector.get_columns('powerlifting_meets')
+    
+    # Dynamically grab the active table's shape
+    active_table = st.session_state.get('active_table')
+    
+    if active_table == "MULTI_TABLE_WORKSPACE":
+        if hasattr(st.session_state, 'dataset_tables') and st.session_state.dataset_tables:
+            active_table = st.session_state.dataset_tables[0]
+        else:
+            active_table = 'powerlifting_meets'
+            
+    if not active_table:
+        active_table = 'powerlifting_meets'
+        
+    try:
+        columns = db_inspector.get_columns(active_table)
+    except:
+        columns = []
+        
     return columns
+
+# ── Virtual Workspace State Management ──────────────────────────────────────
+def is_dataset_workspace_active():
+    """Check if we're in a multi-table dataset workspace."""
+    return (
+        hasattr(st.session_state, 'multi_sheet_import') 
+        or hasattr(st.session_state, 'active_relationships')
+    )
+
+def reset_for_new_upload():
+    """Clear all multi-sheet workspace state before new upload."""
+    keys_to_clear = [
+        'multi_sheet_import',
+        'active_relationships',
+        'sheet_to_table_mapping',
+        'dataset_tables',
+        'dataset_name'
+    ]
+    for key in keys_to_clear:
+        if key in st.session_state:
+            del st.session_state[key]
 
 # ── Sidebar ────────────────────────────────────────────────────────────────────
 with st.sidebar:
@@ -226,6 +293,100 @@ with st.sidebar:
                 margin-bottom: 8px;
             }
         </style>
+        
+        <style>
+            /* Custom Tab Styling - Ultra Professional & Square (Streamlit 1.35+ compatible) */
+            div[data-testid="stTabs"] [role="tablist"] {
+                gap: 4px !important;
+                background-color: #f8fafc !important;
+                border: 1px solid #e2e8f0 !important;
+                border-radius: 4px !important;
+                padding: 4px !important;
+            }
+
+            div[data-testid="stTabs"] button[role="tab"] {
+                height: 42px !important;
+                white-space: pre-wrap !important;
+                background-color: transparent !important;
+                border-radius: 2px !important;
+                padding: 8px 24px !important;
+                color: #64748b !important;
+                font-weight: 700 !important;
+                font-size: 13px !important;
+                text-transform: uppercase !important;
+                letter-spacing: 0.5px !important;
+                border: none !important;
+                transition: all 0.2s ease-in-out !important;
+            }
+
+            div[data-testid="stTabs"] button[role="tab"]:hover {
+                color: #0f172a !important;
+                background-color: #f1f5f9 !important;
+            }
+
+            div[data-testid="stTabs"] button[role="tab"][aria-selected="true"] {
+                background-color: #0ea5e9 !important;
+                color: white !important;
+                box-shadow: 0 2px 4px rgba(14, 165, 233, 0.3) !important;
+            }
+
+            /* Radio Buttons to Segmented Controls */
+            div[data-testid="stRadio"] > div[role="radiogroup"] {
+                gap: 0 !important;
+                background-color: #f8fafc !important;
+                border: 1px solid #e2e8f0 !important;
+                border-radius: 4px !important;
+                display: inline-flex !important;
+                flex-direction: row !important;
+                overflow: hidden !important;
+            }
+
+            div[data-testid="stRadio"] [data-baseweb="radio"] {
+                padding: 10px 20px !important;
+                margin: 0 !important;
+                border-right: 1px solid #e2e8f0 !important;
+                background-color: transparent !important;
+                cursor: pointer !important;
+                transition: all 0.2s ease-in-out !important;
+                align-items: center !important;
+                justify-content: center !important;
+            }
+
+            div[data-testid="stRadio"] [data-baseweb="radio"]:last-child {
+                border-right: none !important;
+            }
+
+            /* Hide the circular radio indicator */
+            div[data-testid="stRadio"] [data-baseweb="radio"] > div:first-child {
+                display: none !important;
+            }
+
+            /* Base text style */
+            div[data-testid="stRadio"] [data-baseweb="radio"] p {
+                font-size: 13px !important;
+                font-weight: 700 !important;
+                color: #64748b !important;
+                margin: 0 !important;
+            }
+
+            /* Hover state */
+            div[data-testid="stRadio"] [data-baseweb="radio"]:hover {
+                background-color: #f1f5f9 !important;
+            }
+            div[data-testid="stRadio"] [data-baseweb="radio"]:hover p {
+                color: #0f172a !important;
+            }
+
+            /* Active/Selected state */
+            div[data-testid="stRadio"] [data-baseweb="radio"]:has(input:checked) {
+                background-color: #0ea5e9 !important;
+                box-shadow: inset 0 2px 4px rgba(0,0,0,0.05) !important;
+            }
+
+            div[data-testid="stRadio"] [data-baseweb="radio"]:has(input:checked) p {
+                color: white !important;
+            }
+        </style>
         """, unsafe_allow_html=True)
         
         # ── HEADER ──
@@ -240,89 +401,189 @@ with st.sidebar:
         """, unsafe_allow_html=True)
 
         # ── SECTION 1: Active Table Card ──
-        from database.get_schema import get_all_tables, get_table_schema, format_column_type
+        from database.get_schema import (
+    get_all_tables, get_table_schema, format_column_type, get_registered_tables_map, init_file_registry,
+    delete_from_file_registry, cleanup_orphaned_registry_entries, identify_old_convention_tables, cleanup_old_convention_tables
+)
         
         # Initialize session state for active table
         if 'active_table' not in st.session_state:
-            tables = get_all_tables()
-            if 'powerlifting_meets' in tables:
-                st.session_state.active_table = 'powerlifting_meets'
-            elif tables:
-                st.session_state.active_table = tables[0]
+            # If already in workspace mode, don't override
+            if hasattr(st.session_state, 'active_relationships') and st.session_state.active_relationships:
+                st.session_state.active_table = "MULTI_TABLE_WORKSPACE"
             else:
-                st.session_state.active_table = None
+                tables = get_all_tables()
+                if 'powerlifting_meets' in tables:
+                    st.session_state.active_table = 'powerlifting_meets'
+                elif tables:
+                    st.session_state.active_table = tables[0]
+                else:
+                    st.session_state.active_table = None
         
         st.markdown('<div class="section-card-blue"><div class="section-label">📊 Active Database</div>', unsafe_allow_html=True)
         
-        tables = get_all_tables()
-        if tables:
-            selected_table = st.selectbox(
-                "Database Table",
-                options=tables,
-                index=tables.index(st.session_state.active_table) if st.session_state.active_table in tables else 0,
-                help="Select which table to query",
-                key="table_selector",
-                label_visibility="collapsed"
-            )
-            st.session_state.active_table = selected_table
+        # VIRTUAL WORKSPACE MODE: Show unified dataset view
+        if hasattr(st.session_state, 'dataset_tables') and st.session_state.dataset_tables:
+            dataset_name = st.session_state.get('dataset_name', 'Dataset')
+            dataset_tables = st.session_state.dataset_tables
             
-            # Get schema and show compact info
-            schema_info = get_table_schema(selected_table)
-            if schema_info['success']:
-                # Inline metrics with icons
-                st.markdown(f"""
-                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 8px;">
-                    <div style="padding: 6px; background: #ffffff; border-radius: 4px; text-align: center;">
-                        <div style="font-size: 0.7rem; color: #64748b; font-weight: 600; margin-bottom: 2px;">Rows</div>
-                        <div style="font-size: 0.95rem; font-weight: 700; color: #0284c7;">{schema_info['row_count']:,}</div>
+            # Calculate total rows across all tables
+            total_rows = 0
+            for tbl in dataset_tables:
+                try:
+                    schema_info = get_table_schema(tbl)
+                    if schema_info['success']:
+                        total_rows += schema_info['row_count']
+                except:
+                    pass
+            
+            # Display Virtual Workspace Header
+            st.markdown(f"""
+            <div style="background: linear-gradient(135deg, #dbeafe 0%, #e0f7ff 100%); border: 2px solid #0284c7; 
+                        border-radius: 12px; padding: 12px; margin-bottom: 8px;">
+                <div style="font-size: 0.75rem; color: #0284c7; font-weight: 700; text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 4px;">
+                    📦 Virtual Workspace
+                </div>
+                <div style="font-size: 1.1rem; font-weight: 800; color: #0c4a6e; margin-bottom: 6px;">
+                    {dataset_name}
+                </div>
+                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px;">
+                    <div style="padding: 6px; background: #ffffff; border-radius: 6px; text-align: center; border: 1px solid #bae6fd;">
+                        <div style="font-size: 0.65rem; color: #0284c7; font-weight: 700; text-transform: uppercase;">Tables</div>
+                        <div style="font-size: 0.95rem; font-weight: 700; color: #0284c7; margin-top: 2px;">{len(dataset_tables)}</div>
                     </div>
-                    <div style="padding: 6px; background: #ffffff; border-radius: 4px; text-align: center;">
-                        <div style="font-size: 0.7rem; color: #64748b; font-weight: 600; margin-bottom: 2px;">Columns</div>
-                        <div style="font-size: 0.95rem; font-weight: 700; color: #0284c7;">{schema_info['column_count']}</div>
+                    <div style="padding: 6px; background: #ffffff; border-radius: 6px; text-align: center; border: 1px solid #bae6fd;">
+                        <div style="font-size: 0.65rem; color: #0284c7; font-weight: 700; text-transform: uppercase;">Total Rows</div>
+                        <div style="font-size: 0.95rem; font-weight: 700; color: #0284c7; margin-top: 2px;">{total_rows:,}</div>
                     </div>
                 </div>
-                """, unsafe_allow_html=True)
-            else:
-                st.text(f"⚠️ Error loading schema: {schema_info['error'][:80]}")
+            </div>
+            """, unsafe_allow_html=True)
+            
+            # Show relationships in collapsible section (if any)
+            if hasattr(st.session_state, 'active_relationships') and st.session_state.active_relationships:
+                with st.expander("🔗 Dataset Relationships", expanded=False):
+                    rel_text = ""
+                    for i, rel in enumerate(st.session_state.active_relationships, 1):
+                        from_table = st.session_state.sheet_to_table_mapping.get(rel['from_sheet'], rel['from_sheet'])
+                        to_table = st.session_state.sheet_to_table_mapping.get(rel['to_sheet'], rel['to_sheet'])
+                        rel_text += f"{i}. `{from_table}`.{rel['from_column']} ↔ `{to_table}`.{rel['to_column']}\n"
+                    st.markdown(rel_text)
         
         st.markdown("</div>", unsafe_allow_html=True)
         
-        # ── SECTION 2: Schema & Data Explorers ──
-        if tables and schema_info.get('success', False):
-            st.markdown('<div class="section-card-blue"><div class="section-label">🔍 Database Structure</div>', unsafe_allow_html=True)
-            col_a, col_b = st.columns(2, gap="small")
+        # ── WORKSPACE ILLUSION: Check if Active Virtual Workspace exists ──
+        if hasattr(st.session_state, 'active_relationships') and st.session_state.active_relationships:
+            # WORKSPACE MODE: Show sleek banner instead of dropdown
+            dataset_name = st.session_state.get('dataset_name', 'Custom Dataset')
+            dataset_tables = st.session_state.get('dataset_tables', [])
             
-            with col_a:
-                with st.expander("Schema", expanded=False):
-                    # Build all schema HTML at once for proper scrollable container
-                    schema_html = '<div style="height: 320px; overflow-y: auto; border: 1px solid #cbd5e1; border-radius: 8px; padding: 12px; background: #f8fafc;">'
-                    for col in schema_info['columns']:
-                        col_icon = "✓" if not col['nullable'] else "○"
-                        formatted_type = format_column_type(col['type'])
-                        schema_html += (
-                            '<div style="padding: 6px 0; border-bottom: 1px solid #e2e8f0; display: flex; align-items: center; gap: 8px;">'
-                            f'<span style="color: #22c55e; font-weight: 600; font-size: 14px;">{col_icon}</span>'
-                            f'<span style="font-family: monospace; color: #0284c7; font-weight: 600; font-size: 13px;">{col["name"]}</span>'
-                            f'<span style="color: #94a3b8; font-size: 12px; margin-left: auto;">{formatted_type}</span>'
-                            '</div>'
-                        )
-                    schema_html += "</div>"
-                    st.markdown(schema_html, unsafe_allow_html=True)
+            st.markdown('<div class="section-card-blue"><div class="section-label">📊 Active Database</div>', unsafe_allow_html=True)
             
-            with col_b:
-                if schema_info['sample_data']:
-                    with st.expander("Sample Data", expanded=False):
-                        sample_df = pd.DataFrame(
-                            schema_info['sample_data'][:3],
-                            columns=[col['name'] for col in schema_info['columns']]
-                        )
-                        # Explicitly set all columns as TextColumn to prevent Streamlit auto-detection
-                        # This prevents email validation errors on columns with "/" or special characters
-                        column_config_override = {
-                            col_name: st.column_config.TextColumn(width="medium") 
-                            for col_name in sample_df.columns
-                        }
-                        st.dataframe(sample_df, use_container_width=True, hide_index=True, column_config=column_config_override)
+            st.success(f"🌌 Virtual Workspace Active: **{dataset_name}**")
+            
+            # Show linked tables summary
+            linked_tables_text = ", ".join(dataset_tables) if dataset_tables else "No tables"
+            st.caption(f"**Linked Data:** {linked_tables_text}")
+            
+            # Set flag for backend query logic
+            st.session_state.active_table = "MULTI_TABLE_WORKSPACE"
+            
+            st.markdown("</div>", unsafe_allow_html=True)
+        
+        # SINGLE-TABLE MODE: Show table selector dropdown with registry
+        else:
+            # Initialize registry on app startup
+            init_file_registry()
+            
+            # PERMANENT FIX: Auto-cleanup orphaned registry entries
+            cleanup_orphaned_registry_entries()
+            
+            # Fetch table map from FastAPI backend
+            try:
+                response = requests.get(f"{API_BASE_URL}/tables")
+                table_map = response.json() if response.status_code == 200 else {}
+            except requests.exceptions.ConnectionError:
+                st.error("❌ Cannot connect to AI Backend. Is the FastAPI server running on port 8080?")
+                table_map = {}
+            
+            if table_map:
+                display_names = list(table_map.keys())
+                
+                # Find correct index for current active_table
+                current_index = 0
+                for i, display_name in enumerate(display_names):
+                    if table_map[display_name] == st.session_state.get('active_table'):
+                        current_index = i
+                        break
+                
+                selected_display_name = st.selectbox(
+                    "Database Table",
+                    options=display_names,
+                    index=current_index,
+                    key="table_selector",
+                    label_visibility="collapsed"
+                )
+                # Save the ACTUAL table name to session state
+                st.session_state.active_table = table_map[selected_display_name]
+                selected_table = st.session_state.active_table
+                
+                # Get schema and show compact info
+                schema_info = get_table_schema(selected_table)
+                if schema_info['success']:
+                    # Inline metrics with icons
+                    st.markdown(f"""
+                    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 8px;">
+                        <div style="padding: 6px; background: #ffffff; border-radius: 4px; text-align: center;">
+                            <div style="font-size: 0.7rem; color: #64748b; font-weight: 600; margin-bottom: 2px;">Rows</div>
+                            <div style="font-size: 0.95rem; font-weight: 700; color: #0284c7;">{schema_info['row_count']:,}</div>
+                        </div>
+                        <div style="padding: 6px; background: #ffffff; border-radius: 4px; text-align: center;">
+                            <div style="font-size: 0.7rem; color: #64748b; font-weight: 600; margin-bottom: 2px;">Columns</div>
+                            <div style="font-size: 0.95rem; font-weight: 700; color: #0284c7;">{schema_info['column_count']}</div>
+                        </div>
+                    </div>
+                    """, unsafe_allow_html=True)
+                else:
+                    st.text(f"⚠️ Error loading schema: {schema_info['error'][:80]}")
+                
+                # ── SECTION 2: Schema & Data Explorers ──
+                st.markdown("</div>", unsafe_allow_html=True)
+                
+                st.markdown('<div class="section-card-blue"><div class="section-label">🔍 Database Structure</div>', unsafe_allow_html=True)
+                col_a, col_b = st.columns(2, gap="small")
+                
+                with col_a:
+                    with st.expander("Schema", expanded=False):
+                        # Build all schema HTML at once for proper scrollable container
+                        schema_html = '<div style="height: 320px; overflow-y: auto; border: 1px solid #cbd5e1; border-radius: 8px; padding: 12px; background: #f8fafc;">'
+                        for col in schema_info['columns']:
+                            col_icon = "✓" if not col['nullable'] else "○"
+                            formatted_type = format_column_type(col['type'])
+                            schema_html += (
+                                '<div style="padding: 6px 0; border-bottom: 1px solid #e2e8f0; display: flex; align-items: center; gap: 8px;">'
+                                f'<span style="color: #22c55e; font-weight: 600; font-size: 14px;">{col_icon}</span>'
+                                f'<span style="font-family: monospace; color: #0284c7; font-weight: 600; font-size: 13px;">{col["name"]}</span>'
+                                f'<span style="color: #94a3b8; font-size: 12px; margin-left: auto;">{formatted_type}</span>'
+                                '</div>'
+                            )
+                        schema_html += "</div>"
+                        st.markdown(schema_html, unsafe_allow_html=True)
+                
+                with col_b:
+                    if schema_info['sample_data']:
+                        with st.expander("Sample Data", expanded=False):
+                            sample_df = pd.DataFrame(
+                                schema_info['sample_data'][:3],
+                                columns=[col['name'] for col in schema_info['columns']]
+                            )
+                            # Explicitly set all columns as TextColumn to prevent Streamlit auto-detection
+                            # This prevents email validation errors on columns with "/" or special characters
+                            column_config_override = {
+                                col_name: st.column_config.TextColumn(width="medium") 
+                                for col_name in sample_df.columns
+                            }
+                            st.dataframe(sample_df, use_container_width=True, hide_index=True, column_config=column_config_override)
         
         st.markdown("</div>", unsafe_allow_html=True)
         st.markdown('<div style="height: 8px;"></div>', unsafe_allow_html=True)
@@ -332,60 +593,380 @@ with st.sidebar:
         
         uploaded_file = st.file_uploader("Choose CSV or Excel file", type=["csv", "xlsx"], label_visibility="collapsed", key="sidebar_file_uploader")
         
-        if uploaded_file:
-            try:
-                if uploaded_file.name.endswith('.csv'):
-                    df = pd.read_csv(uploaded_file)
-                else:
-                    df = pd.read_excel(uploaded_file)
-                
-                from database.ingest_csv import validate_csv, ingest_csv_to_postgres
-                
-                is_valid, errors, warnings = validate_csv(df, uploaded_file.name)
-                
-                if errors:
-                    st.error("Validation Failed")
-                    for error in errors:
-                        st.text(error)
-                else:
-                    st.success(f"{len(df):,} rows × {len(df.columns)} columns")
+        # ── PERMANENT FIX #1: Strict Null-Checking with Session Cleanup ──
+        # If user refreshed or cancelled upload, clean up orphaned session state
+        if uploaded_file is None:
+            # CLEANUP: Remove orphaned session state that causes "scattered sheets" on refresh
+            orphaned_keys = [
+                'multi_sheet_import',
+                'active_relationships', 
+                'sheet_to_table_mapping',
+                'dataset_tables',
+                'dataset_name'
+            ]
+            for key in orphaned_keys:
+                if key in st.session_state:
+                    del st.session_state[key]
+            st.info("📁 Upload a file to begin. Previous session cleared.")
+        
+        elif uploaded_file is not None:
+            # THE UPLOADER LOCK: Check if we've already processed this specific file
+            # This prevents the infinite rerun loop on every query
+            if st.session_state.get('last_uploaded_file') != uploaded_file.name:
+                try:
+                    # Clear old state if switching from dataset to new upload
+                    if is_dataset_workspace_active():
+                        reset_for_new_upload()
                     
-                    proceed = True
-                    if warnings:
-                        st.warning("⚠️ Upload Warnings")
-                        for warn_type, warn_msg in warnings.items():
-                            st.text(f"• {warn_msg}")
-                        proceed = st.checkbox("Continue anyway?", key="proceed_warnings", label_visibility="collapsed")
+                    # ──────────────────────────────────────────────────────────────
+                    # MULTI-SHEET WIZARD: Step 2 - Relationship Configuration
+                    # ──────────────────────────────────────────────────────────────
                     
-                    table_name = st.text_input(
-                        "Table name",
-                        value=uploaded_file.name.split('.')[0].lower(),
-                        label_visibility="collapsed",
-                        placeholder="Enter table name"
-                    )
+                    from database.excel_utils import is_multi_sheet_excel, detect_excel_sheets
+                    from database.relationship_detector import detect_relationships
+                    from database.sanitizer import create_sheet_to_table_mapping
                     
-                    if st.button("🚀 Ingest", use_container_width=True, type="primary") and proceed:
-                        with st.status("📤 Preparing data for ingestion...", expanded=True) as status:
-                            status.write("✓ Reading CSV file...")
-                            status.write("✓ Normalizing column names...")
-                            status.write("⏳ Connecting to PostgreSQL...")
-                            status.write("📊 Ingesting data to database (this may take 3-5 minutes)...")
+                    if uploaded_file.name.endswith('.xlsx') and is_multi_sheet_excel(uploaded_file):
+                        # Detect sheets
+                        excel_info = detect_excel_sheets(uploaded_file)
+                        
+                        if excel_info['success'] and excel_info['sheet_count'] > 1:
+                            sheets_info = excel_info['sheets']
                             
-                            success, message, rows = ingest_csv_to_postgres(df, table_name, if_exists='replace')
+                            # Auto-detect relationships
+                            auto_relationships = detect_relationships(sheets_info)
                             
-                            if success:
-                                status.update(label="✅ Ingestion Complete!", state="complete")
-                                st.success(f"✨ Successfully ingested {rows:,} rows into '{table_name}'")
-                                st.balloons()
-                                import time
-                                time.sleep(2)
-                                st.rerun()
+                            # Display wizard in main body (after sidebar detection)
+                            st.markdown("---")
+                            st.markdown("### 📊 Step 1: Multi-Sheet File Detected")
+                            
+                            col1, col2 = st.columns([2, 1])
+                            with col1:
+                                st.info(f"📄 Found **{excel_info['sheet_count']} sheets** in {uploaded_file.name}")
+                            with col2:
+                                import_mode = st.radio(
+                                    "Import Mode",
+                                    ["Single Sheet", "All Sheets"],
+                                    label_visibility="collapsed",
+                                    horizontal=True
+                                )
+                            
+                            # Sheet Selection
+                            st.subheader("📋 Select Sheets to Import")
+                            
+                            selected_sheets = {}
+                            for sheet in sheets_info:
+                                sheet_name = sheet['name']
+                                
+                                # PERMANENT FIX: Smart defaults - exclude junk sheets
+                                junk_keywords = ['pivot', 'sql', 'chart', 'summary']
+                                is_junk_sheet = any(
+                                    keyword in sheet_name.lower() for keyword in junk_keywords
+                                )
+                                default_checked = not is_junk_sheet  # False if junk, True otherwise
+                                
+                                col1, col2, col3 = st.columns([1, 3, 1])
+                                
+                                with col1:
+                                    select = st.checkbox(
+                                        label="",
+                                        value=default_checked,  # Smart default based on sheet name
+                                        key=f"sheet_select_{sheet_name}",
+                                        label_visibility="collapsed"
+                                    )
+                                
+                                with col2:
+                                    st.write(f"**{sheet_name}** — {len(sheet['columns'])} columns, ~{sheet['row_count']} rows")
+                                    if sheet['columns']:
+                                        st.caption(", ".join(sheet['columns'][:5]) + ("..." if len(sheet['columns']) > 5 else ""))
+                                
+                                with col3:
+                                    st.write(f"✓ {sheet['row_count']}")
+                                
+                                selected_sheets[sheet_name] = select
+                            
+                            # Get only selected sheets
+                            selected_sheet_names = [name for name, selected in selected_sheets.items() if selected]
+                            
+                            # Relationships Configuration
+                            if len(selected_sheet_names) > 1:
+                                st.subheader("🔗 Configure Relationships")
+                                st.write("Set up how sheets relate to each other for joining data.")
+                                
+                                # Initialize relationships in session state
+                                if 'relationships' not in st.session_state:
+                                    st.session_state.relationships = auto_relationships
+                                
+                                # Section A: Auto-Detected
+                                if auto_relationships:
+                                    st.markdown("#### ✓ Auto-Detected (Confirmed)")
+                                    for rel in auto_relationships:
+                                        col1, col2 = st.columns([9, 1])
+                                        with col1:
+                                            st.markdown(
+                                                f"**{rel['from_sheet']}.{rel['from_column']}** → **{rel['to_sheet']}.{rel['to_column']}**"
+                                            )
+                                            st.caption(rel['reason'])
+                                        with col2:
+                                            toggle = st.checkbox(
+                                                "✓",
+                                                value=True,
+                                                key=f"toggle_rel_{rel['from_sheet']}_{rel['from_column']}",
+                                                label_visibility="collapsed"
+                                            )
+                                
+                                # Section B: Add Custom
+                                st.markdown("#### ➕ Add Custom Relationship")
+                                
+                                col1, col_arrow, col2 = st.columns([2.5, 0.5, 2.5])
+                                
+                                with col1:
+                                    from_sheet = st.selectbox(
+                                        "From Sheet",
+                                        options=selected_sheet_names,
+                                        key="custom_from_sheet"
+                                    )
+                                    from_cols = sheets_info[[s['name'] for s in sheets_info].index(from_sheet)]['columns']
+                                    from_col = st.selectbox(
+                                        "From Column",
+                                        options=from_cols,
+                                        key="custom_from_col"
+                                    )
+                                
+                                with col_arrow:
+                                    st.write("**→**")
+                                
+                                with col2:
+                                    to_sheet = st.selectbox(
+                                        "To Sheet",
+                                        options=[s for s in selected_sheet_names if s != from_sheet],
+                                        key="custom_to_sheet"
+                                    )
+                                    to_cols = sheets_info[[s['name'] for s in sheets_info].index(to_sheet)]['columns']
+                                    to_col = st.selectbox(
+                                        "To Column",
+                                        options=to_cols,
+                                        key="custom_to_col"
+                                    )
+                                
+                                if st.button("➕ Add This Relationship", use_container_width=True):
+                                    new_rel = {
+                                        'from_sheet': from_sheet,
+                                        'from_column': from_col,
+                                        'to_sheet': to_sheet,
+                                        'to_column': to_col,
+                                        'confidence': 'USER_DEFINED',
+                                        'reason': 'Manually configured'
+                                    }
+                                    if new_rel not in st.session_state.relationships:
+                                        st.session_state.relationships.append(new_rel)
+                                        st.success("✅ Relationship added!")
+                                        st.rerun()
+                                
+                                # Store sheet info and relationships for later use
+                                st.session_state.multi_sheet_import = {
+                                    'workbook_name': uploaded_file.name,
+                                    'selected_sheets': selected_sheet_names,
+                                    'relationships': st.session_state.relationships,
+                                    'sheets_info': sheets_info
+                                }
+                                
+                                st.markdown("---")
+                                st.markdown("**Ready to proceed?** Click 'Ingest' below to import selected sheets.")
+                            
+                            # Fall through to ingestion logic below
+                    
+                    # ── Single Sheet or CSV Logic ──
+                    # PERMANENT FIX #2: Only proceed if uploaded_file is safely in memory
+                    df = None
+                    
+                    if uploaded_file.name.endswith('.csv'):
+                        df = pd.read_csv(uploaded_file)
+                    else:
+                        # For single-sheet Excel or after multi-sheet selection
+                        if 'multi_sheet_import' not in st.session_state:
+                            df = pd.read_excel(uploaded_file)
+                        else:
+                            # Skip single df read for multi-sheet
+                            df = None
+                    
+                    # PERMANENT FIX #2: CRITICAL - Only proceed if uploaded_file is not None AND (df loaded OR multi-sheet import exists)
+                    # This prevents the orphaned session state vulnerability where uploaded_file becomes None on refresh
+                    if uploaded_file is not None and (df is not None or 'multi_sheet_import' in st.session_state):
+                        from database.ingest_csv import validate_csv, ingest_csv_to_postgres
+                        
+                        # PERMANENT FIX: Initialize variables for both single and multi-sheet paths
+                        proceed = True
+                        table_name = None
+                        
+                        # Only validate and show form if SINGLE-SHEET
+                        if df is not None:
+                            is_valid, errors, warnings = validate_csv(df, uploaded_file.name)
+                            
+                            if errors:
+                                st.error("Validation Failed")
+                                for error in errors:
+                                    st.text(error)
+                                proceed = False
                             else:
-                                status.update(label="❌ Ingestion Failed", state="error")
-                                st.error(f"Error: {message}")
-            
-            except Exception as upload_err:
-                st.text("Error: " + str(upload_err)[:100])
+                                st.success(f"{len(df):,} rows × {len(df.columns)} columns")
+                                proceed = True
+                                if warnings:
+                                    st.warning("⚠️ Upload Warnings")
+                                    for warn_type, warn_msg in warnings.items():
+                                        st.text(f"• {warn_msg}")
+                                    proceed = st.checkbox("Continue anyway?", key="proceed_warnings", label_visibility="collapsed")
+                                
+                                table_name = st.text_input(
+                                    "Table name",
+                                    value=uploaded_file.name.split('.')[0].lower(),
+                                    label_visibility="collapsed",
+                                    placeholder="Enter table name"
+                                )
+                        
+                        # PERMANENT FIX: Button moved to correct indentation level
+                        # Now appears for BOTH single-sheet AND multi-sheet imports
+                        if st.button("🚀 Ingest", use_container_width=True, type="primary") and proceed:
+                            with st.status("📤 Preparing data for ingestion...", expanded=True) as status:
+                                
+                                # Handle multi-sheet imports
+                                if 'multi_sheet_import' in st.session_state:
+                                    multi_sheet = st.session_state.multi_sheet_import
+                                    selected_sheet_names = multi_sheet['selected_sheets']
+                                    
+                                    status.write(f"🔄 Ingesting {len(selected_sheet_names)} sheets...")
+                                    
+                                    from database.sanitizer import sanitize_table_name
+                                    ingest_results = {
+                                        'successful': [],
+                                        'failed': []
+                                    }
+                                    
+                                    for sheet_name in selected_sheet_names:
+                                        try:
+                                            status.write(f"  ⏳ Processing sheet: {sheet_name}...")
+                                            
+                                            # Read sheet data
+                                            # PERMANENT FIX #3: Double-check uploaded_file still exists before reading
+                                            if uploaded_file is None:
+                                                st.error("❌ Upload session lost. Please upload the file again.")
+                                                break  # Exit the loop, don't try more sheets
+                                            
+                                            df_sheet = pd.read_excel(uploaded_file, sheet_name=sheet_name)
+                                            
+                                            # Validate - use uploaded_file.name (has .xlsx extension) not sheet_name
+                                            is_valid_sheet, sheet_errors, sheet_warnings = validate_csv(df_sheet, uploaded_file.name)
+                                            
+                                            if sheet_errors:
+                                                ingest_results['failed'].append({
+                                                    'sheet': sheet_name,
+                                                    'reason': sheet_errors[0]
+                                                })
+                                                status.write(f"  ❌ {sheet_name}: Validation failed")
+                                                continue
+                                            
+                                            # Generate table name
+                                            table_name_sheet = sanitize_table_name(uploaded_file.name, sheet_name)
+                                            
+                                            # Ingest
+                                            success, message, rows = ingest_csv_to_postgres(
+                                                df_sheet, 
+                                                table_name_sheet, 
+                                                if_exists='replace',
+                                                original_filename=uploaded_file.name,
+                                                sheet_name=sheet_name
+                                            )
+                                            
+                                            if success:
+                                                ingest_results['successful'].append({
+                                                    'sheet': sheet_name,
+                                                    'table': table_name_sheet,
+                                                    'rows': rows
+                                                })
+                                                status.write(f"  ✓ {sheet_name} → {table_name_sheet} ({rows:,} rows)")
+                                                st.session_state.active_table = table_name_sheet
+                                            else:
+                                                ingest_results['failed'].append({
+                                                    'sheet': sheet_name,
+                                                    'reason': message
+                                                })
+                                                status.write(f"  ❌ {sheet_name}: {message[:60]}...")
+                                        
+                                        except Exception as e:
+                                            ingest_results['failed'].append({
+                                                'sheet': sheet_name,
+                                                'reason': str(e)[:100]
+                                            })
+                                            status.write(f"  ❌ {sheet_name}: {str(e)[:60]}...")
+                                    
+                                    # Final report
+                                    if ingest_results['successful']:
+                                        status.update(label=f"✅ Ingested {len(ingest_results['successful'])} sheets!", state="complete")
+                                        st.success(f"✨ Successfully ingested {len(ingest_results['successful'])} sheets")
+                                        
+                                        for succ in ingest_results['successful']:
+                                            st.info(f"📊 **{succ['table']}** — {succ['rows']:,} rows")
+                                        
+                                        st.balloons()
+                                        
+                                        # Create mapping: original sheet name → sanitized table name
+                                        sheet_to_table_mapping = {}
+                                        dataset_tables_list = []  # NEW: List of all ingested tables for Virtual Workspace
+                                        for succ in ingest_results['successful']:
+                                            sheet_to_table_mapping[succ['sheet']] = succ['table']
+                                            dataset_tables_list.append(succ['table'])  # NEW
+                                        
+                                        # Store relationships and mapping in session
+                                        st.session_state.active_relationships = multi_sheet['relationships']
+                                        st.session_state.sheet_to_table_mapping = sheet_to_table_mapping
+                                        st.session_state.dataset_tables = dataset_tables_list  # NEW: For Virtual Workspace
+                                        st.session_state.dataset_name = uploaded_file.name.split('.')[0]  # NEW: Dataset name for UI
+                                        
+                                        # Set active_table to first successfully ingested table (MUST be sanitized name)
+                                        if ingest_results['successful']:
+                                            st.session_state.active_table = ingest_results['successful'][0]['table']
+                                        
+                                        # Clear multi-sheet state and set the uploader lock
+                                        st.session_state.last_uploaded_file = uploaded_file.name  # ← THE UPLOADER LOCK: Mark file as processed
+                                        del st.session_state.multi_sheet_import
+                                        import time
+                                        time.sleep(1)
+                                        st.rerun()
+                                    
+                                    if ingest_results['failed']:
+                                        st.warning(f"⚠️ {len(ingest_results['failed'])} sheets failed:")
+                                        for fail in ingest_results['failed']:
+                                            st.text(f"  • {fail['sheet']}: {fail['reason']}")
+                                
+                                else:
+                                    # Single sheet handling (existing logic)
+                                    status.write("✓ Reading file...")
+                                    status.write("✓ Normalizing column names...")
+                                    status.write("⏳ Connecting to PostgreSQL...")
+                                    status.write("📊 Ingesting data to database (this may take 3-5 minutes)...")
+                                    
+                                    success, message, rows = ingest_csv_to_postgres(
+                                        df, 
+                                        table_name, 
+                                        if_exists='replace',
+                                        original_filename=uploaded_file.name,
+                                        sheet_name='Main'
+                                    )
+                                    
+                                    if success:
+                                        status.update(label="✅ Ingestion Complete!", state="complete")
+                                        st.success(f"✨ Successfully ingested {rows:,} rows into '{table_name}'")
+                                        st.balloons()
+                                        st.session_state.last_uploaded_file = uploaded_file.name  # ← THE UPLOADER LOCK: Mark file as processed
+                                        import time
+                                        time.sleep(1)
+                                        st.rerun()
+                                    else:
+                                        status.update(label="❌ Ingestion Failed", state="error")
+                                        st.error(f"Error: {message}")
+                
+                except Exception as upload_err:
+                    st.text("Error: " + str(upload_err)[:100])
         
         st.markdown("</div>", unsafe_allow_html=True)
         st.markdown('<div style="height: 8px;"></div>', unsafe_allow_html=True)
@@ -410,12 +991,7 @@ with st.sidebar:
                         if st.button("✅ Confirm", use_container_width=True):
                             try:
                                 with st.spinner("🗑️ Connecting to database..."):
-                                    db_user = os.getenv("DB_USER")
-                                    db_password = os.getenv("DB_PASSWORD")
-                                    db_host = os.getenv("DB_HOST")
-                                    db_port = os.getenv("DB_PORT")
-                                    db_name = os.getenv("DB_NAME")
-                                    db_url = f"postgresql://{db_user}:{db_password}@{db_host}:{db_port}/{db_name}"
+                                    db_url = os.getenv("DB_URL", "postgresql://POWERLIFTER_KUNAL:Kunal123@localhost:2003/powerlifting_db")
                                     
                                     engine = create_engine(db_url)
                                 
@@ -424,6 +1000,9 @@ with st.sidebar:
                                         from sqlalchemy import text
                                         conn.execute(text(f'DROP TABLE IF EXISTS "{st.session_state.active_table}" CASCADE'))
                                         conn.commit()
+                                    
+                                    # PERMANENT FIX: Also remove from file_registry
+                                    delete_from_file_registry(st.session_state.active_table)
                                 
                                 st.success(f"✨ Table '{st.session_state.active_table}' deleted successfully!")
                                 st.session_state.show_delete_confirmation = False
@@ -446,6 +1025,72 @@ with st.sidebar:
                 </div>
             </div>
             """, unsafe_allow_html=True)
+        
+        st.markdown("</div>", unsafe_allow_html=True)
+        
+        # ── PERMANENT FIX: Database Cleanup Utilities ──
+        with st.expander("🧹 Database Cleanup (Advanced)", expanded=False):
+            st.markdown("""
+            **Cleanup Tools:**
+            - **Orphaned Entries**: Remove file_registry entries for deleted tables
+            - **Old Convention Tables**: Drop tables created before the naming fix (with __ in name)
+            """)
+            
+            cleanup_cols = st.columns(2, gap="small")
+            
+            with cleanup_cols[0]:
+                if st.button("🧹 Clean Orphaned Entries", use_container_width=True):
+                    count, deleted = cleanup_orphaned_registry_entries()
+                    if count > 0:
+                        st.success(f"✓ Cleaned {count} orphaned entries:\n- " + "\n- ".join(deleted[:10]))
+                        if len(deleted) > 10:
+                            st.caption(f"...and {len(deleted) - 10} more")
+                        st.rerun()
+                    else:
+                        st.info("✓ No orphaned entries found")
+            
+            with cleanup_cols[1]:
+                if st.button("⚠️ Clean Old Tables", use_container_width=True):
+                    old_tables, count = identify_old_convention_tables()
+                    if count > 0:
+                        st.warning(f"Found {count} old-convention tables. Dropping now...")
+                        dropped_count, dropped = cleanup_old_convention_tables()
+                        st.success(f"✓ Dropped {dropped_count} old tables:\n- " + "\n- ".join(dropped[:10]))
+                        if len(dropped) > 10:
+                            st.caption(f"...and {len(dropped) - 10} more")
+                        st.rerun()
+                    else:
+                        st.info("✓ No old-convention tables found")
+        
+        st.markdown("</div>", unsafe_allow_html=True)
+        
+        # ── PERMANENT FIX #2: Cache Management Section ──
+        st.markdown('<div class="section-card-blue"><div class="section-label">🧠 Query Cache Management</div>', unsafe_allow_html=True)
+        
+        cache_info_cols = st.columns([1, 1])
+        with cache_info_cols[0]:
+            # Count cached queries
+            cache_count = sum(1 for key in st.session_state.keys() if key.startswith("pipeline_cache_"))
+            st.metric("Cached Queries", cache_count)
+        with cache_info_cols[1]:
+            # Show current prompt version
+            from rag_pipeline.chain import get_prompt_version_hash
+            prompt_hash = get_prompt_version_hash()
+            st.caption(f"Prompt v{prompt_hash}")
+        
+        st.caption("💡 Cache stores query results to save tokens. Clear if prompts have been updated.")
+        
+        if st.button("🧹 Clear Query Cache", use_container_width=True, type="secondary"):
+            # Remove all pipeline cache entries from session state
+            keys_to_clear = [key for key in st.session_state.keys() if key.startswith("pipeline_cache_")]
+            for key in keys_to_clear:
+                del st.session_state[key]
+            
+            st.success(f"✅ Cleared {len(keys_to_clear)} cached queries! Fresh LLM calls will be made.")
+            st.info("💡 On your next query, the LLM will use the latest prompts. This is how permanent fixes take effect.")
+            import time
+            time.sleep(2)
+            st.rerun()
         
         st.markdown("</div>", unsafe_allow_html=True)
         st.divider()
@@ -528,6 +1173,30 @@ st.markdown("""
 if st.session_state.active_table:
     col_count = len(get_dynamic_schema())
     
+    # ✅ ARCHITECTURAL TWEAK #2: BI Environment Selection (Execution Gate Setup)
+    st.markdown("""
+<div style="margin-bottom: 12px;">
+    <span style="color: #94a3b8; font-size: 12px; font-weight: 500; letter-spacing: 0.5px;">
+        Select Target BI Environment
+    </span>
+</div>
+""", unsafe_allow_html=True)
+
+    selected_bi_tool = st.radio(
+        "Target BI Environment",
+        options=["Power BI (DAX)", "Tableau (Calculated Fields)"],
+        horizontal=True,
+        label_visibility="collapsed"
+    )
+    st.session_state.selected_bi_tool = selected_bi_tool
+
+    # Add subtle hint below toggle
+    st.markdown("""
+<div style="text-align: center; margin-bottom: 12px; font-size: 11px; color: #cbd5e1;">
+    💡 Choose your BI tool's syntax for measure/field generation
+</div>
+""", unsafe_allow_html=True)
+    
     # Styled hint above search bar
     st.markdown(f"""
     <div style="margin-bottom: 6px;">
@@ -566,76 +1235,191 @@ else:
 
 # ── Result Section ─────────────────────────────────────────────────────────
 if submit and question:
+    # ✅ ARCHITECTURAL TWEAK #2: Execution Gate (Failsafe Token Protection)
+    # Validates BI tool selection BEFORE Phase 1 (SQL generation) to prevent token waste
+    selected_tool = st.session_state.get("selected_bi_tool")
+    if not selected_tool or selected_tool is None:
+        st.warning("⚠️ Please select a Target BI Environment before submitting your query.")
+        st.stop()  # Exit immediately, do NOT proceed to Phase 1
+    
+    # If we reach here, BI tool is valid → proceed with normal execution
     st.divider()
     st.markdown("### 📊 Query Results")
 
     with st.status("🧠 Processing Your Question...", expanded=True) as status_container:
         try:
-            # Step 1: Retrieve context from database
-            status_container.update(label="🔍 Retrieving context from database...", state="running")
-            retrieval_start = time.time()
+            from rag_pipeline.chain import generate_dax_measure, get_prompt_version_hash
+            import hashlib
             
-            from rag_pipeline.chain import get_sql_chain
+            # ============================================================================
+            # STREAMLIT CACHING: Repeated queries return instantly (ZERO tokens)
+            # PERMANENT FIX: Cache key now includes prompt version hash
+            # When prompts.py changes → hash changes → old cache invalidated automatically
+            # ============================================================================
+            active_table = st.session_state.active_table  # ✅ Retrieve from session state
             
-            # Pass the active_table to the chain for direct schema injection (Phase 3)
-            active_table = st.session_state.get('active_table', 'powerlifting_meets')
-            chain = get_sql_chain(active_table=active_table)
+            # PERMANENT FIX #1: Include prompt version hash in cache key
+            # This ensures cache is invalidated whenever prompts are updated
+            prompt_version = get_prompt_version_hash()
+            cache_key = hashlib.sha256(
+                (question + str(active_table) + str(selected_tool) + prompt_version).encode()
+            ).hexdigest()
+            cache_store_key = f"pipeline_cache_{cache_key}"
             
-            retrieval_time = time.time() - retrieval_start
-            status_container.write(f"✓ Retrieved schema context for '{active_table}' ({retrieval_time:.2f}s)")
-            
-            # Step 2: Generate SQL with LLM
-            status_container.update(label="🤖 Generating SQL with Llama 3.3...", state="running")
-            sql_start = time.time()
-            
-            response = chain.invoke({"question": question})
-            
-            sql_time = time.time() - sql_start
-            status_container.write(f"✓ Generated SQL ({sql_time:.2f}s)")
-            
-            # Step 3: Execute query
-            status_container.update(label="🗄️ Executing query on PostgreSQL...", state="running")
-            exec_start = time.time()
-            
-            # Extract SQL query and execution result
-            generated_sql = response.get("sql", "")
-            query_result = response.get("result", [])
-            success = response.get("success", False)
-            error_msg = response.get("error", "")
-            
-            if not success and error_msg:
-                raise Exception(error_msg)
-            
-            exec_time = time.time() - exec_start
-            rows_returned = len(query_result) if isinstance(query_result, list) else 1
-            status_container.write(f"✓ Executed query ({exec_time:.2f}s) • {rows_returned} rows returned")
-            
-            # Step 4: Format natural language response
-            status_container.update(label="✨ Formatting natural language response...", state="running")
-            nlp_start = time.time()
-            
-            natural_answer, nlp_metrics = get_natural_response(question, str(query_result))
-            
-            nlp_time = time.time() - nlp_start
-            status_container.write(f"✓ Formatted response ({nlp_time:.2f}s)")
-            
-            # Update status to complete
-            total_time = retrieval_time + sql_time + exec_time + nlp_time
-            status_container.update(label=f"✅ Complete ({total_time:.2f}s total)", state="complete")
-            
-            # Store metrics for later display
-            pipeline_metrics = {
-                'retrieval_ms': round(retrieval_time * 1000, 2),
-                'sql_generation_ms': round(sql_time * 1000, 2),
-                'query_execution_ms': round(exec_time * 1000, 2),
-                'nlp_formatting_ms': round(nlp_time * 1000, 2),
-                'total_ms': round(total_time * 1000, 2),
-                'rows_returned': rows_returned,
-                'nlp_metrics': nlp_metrics,
-                'system_prompt': nlp_metrics.get('system_prompt', '')
-            }
-            
-            st.success("✅ Query Executed Successfully!")
+            # Check if result is already cached
+            if cache_store_key in st.session_state and st.session_state.get(cache_store_key):
+                cached_data = st.session_state[cache_store_key]
+                # Restore cached state and skip to display
+                st.session_state.generated_sql = cached_data.get("generated_sql", "")
+                st.session_state.query_result = cached_data.get("query_result", [])
+                st.session_state.current_schema_context = cached_data.get("schema_context", "")
+                st.session_state.orchestration_phase2_result = cached_data.get("phase2_result", {})
+                
+                # Setup local variables expected by the rest of the code
+                generated_sql = cached_data.get("generated_sql", "")
+                query_result = cached_data.get("query_result", [])
+                success = True
+                
+                # Display metrics from cache
+                pipeline_metrics = cached_data.get("pipeline_metrics", {})
+                natural_answer = cached_data.get("natural_answer", "")
+                executive_summary = cached_data.get("executive_summary", "")
+                nlp_metrics = cached_data.get("nlp_metrics", {})
+                
+                status_container.update(label=f"✅ Complete (from cache)", state="complete")
+                st.success("✅ Query Executed Successfully (from cache)!")
+            else:
+                # Step 1: Retrieve context from database
+                status_container.update(label="🔍 Retrieving context from database...", state="running")
+                retrieval_start = time.time()
+                
+                # Pass the active_table to the chain for direct schema injection
+                # Check if multi-table mode with relationships
+                is_multi_table = False
+                relationships_for_llm = None
+                dataset_tables = None  # NEW: For Virtual Workspace
+                
+                # NEW: Detect if we're in Workspace mode (from UI flag)
+                if active_table == "MULTI_TABLE_WORKSPACE":
+                    is_multi_table = True
+                    # Workspace mode automatically enables multi-table with relationships
+                    if hasattr(st.session_state, 'active_relationships') and st.session_state.active_relationships:
+                        from database.table_resolver import resolve_relationship_sheet_names
+                        relationships_for_llm = resolve_relationship_sheet_names(st.session_state.active_relationships)
+                    
+                    if hasattr(st.session_state, 'dataset_tables'):
+                        dataset_tables = st.session_state.dataset_tables
+                
+                elif hasattr(st.session_state, 'active_relationships') and st.session_state.active_relationships:
+                    # Traditional multi-table detection (non-workspace mode)
+                    from database.table_resolver import resolve_relationship_sheet_names
+                    relationships_for_llm = resolve_relationship_sheet_names(st.session_state.active_relationships)
+                    is_multi_table = len(relationships_for_llm) > 0
+                
+                retrieval_time = time.time() - retrieval_start
+                dataset_context = f"Virtual Workspace ('{st.session_state.get('dataset_name', 'Dataset')}')" if dataset_tables else f"'{active_table}'"
+                status_container.write(f"✓ Retrieved schema context for {dataset_context} ({retrieval_time:.2f}s)")
+                
+                # Step 2: Generate SQL with FastAPI Backend
+                status_container.update(label="🤖 Generating SQL with Llama 3.3 (via FastAPI)...", state="running")
+                sql_start = time.time()
+                
+                # ============================================================================
+                # CALL FASTAPI MICROSERVICE: Bypass local chain/orchestrator
+                # ============================================================================
+                with st.spinner("Analyzing data via FastAPI..."):
+                    try:
+                        payload = {
+                            "question": question,
+                            "active_table": st.session_state.active_table
+                        }
+                        api_response = requests.post(f"{API_BASE_URL}/query", json=payload, timeout=60)
+                        response = api_response.json()
+                        
+                        if not api_response.ok:
+                            raise Exception(f"API Error {api_response.status_code}: {response.get('error', 'Unknown error')}")
+                        
+                        # Extract Phase 1 result (SQL generation & execution)
+                        sql_time = time.time() - sql_start
+                        status_container.write(f"✓ Generated SQL ({sql_time:.2f}s)")
+                        
+                        # For now, phase2_result is None (DAX logic skipped in API mode)
+                        phase2_result = None
+                        st.session_state.orchestration_phase2_result = phase2_result
+                        
+                        # Step 3: Extract results
+                        status_container.update(label="✓ Query executed on PostgreSQL", state="complete")
+                        exec_time = 0.01  # Minimal time since API handled execution
+                        
+                        # Extract SQL query and execution result
+                        generated_sql = response.get("sql", "")
+                        query_result = response.get("result", [])
+                        success = response.get("success", False)
+                        error_msg = response.get("error", "")
+                        
+                        # ✅ Store results in session state for Tab 4 access
+                        if success:
+                            st.session_state.generated_sql = generated_sql
+                            st.session_state.query_result = query_result
+                            st.session_state.current_schema_context = response.get("schema_context", "")
+                        
+                        if not success and error_msg:
+                            raise Exception(error_msg)
+                        
+                    except requests.exceptions.ConnectionError:
+                        st.error("❌ FastAPI backend unreachable. Please ensure it's running on port 8080.")
+                        raise
+                    except Exception as e:
+                        st.error(f"API Error: {str(e)}")
+                        raise
+                rows_returned = len(query_result) if isinstance(query_result, list) else 1
+                status_container.write(f"✓ Executed query ({exec_time:.2f}s) • {rows_returned} rows returned")
+                
+                # Step 4: Format natural language response
+                status_container.update(label="✨ Formatting natural language response...", state="running")
+                nlp_start = time.time()
+                
+                natural_answer, nlp_metrics = get_natural_response(question, str(query_result))
+                
+                # ============================================================================
+                # EXECUTIVE SUMMARY: 2-sentence business insight (OPTIONAL FEATURE)
+                # ============================================================================
+                executive_summary, summary_latency = get_executive_summary(question, query_result)
+                
+                nlp_time = time.time() - nlp_start
+                status_container.write(f"✓ Formatted response ({nlp_time:.2f}s)")
+                
+                # Update status to complete
+                total_time = retrieval_time + sql_time + exec_time + nlp_time
+                status_container.update(label=f"✅ Complete ({total_time:.2f}s total)", state="complete")
+                
+                # Store metrics for later display
+                pipeline_metrics = {
+                    'retrieval_ms': round(retrieval_time * 1000, 2),
+                    'sql_generation_ms': round(sql_time * 1000, 2),
+                    'query_execution_ms': round(exec_time * 1000, 2),
+                    'nlp_formatting_ms': round(nlp_time * 1000, 2),
+                    'total_ms': round(total_time * 1000, 2),
+                    'rows_returned': rows_returned,
+                    'nlp_metrics': nlp_metrics,
+                    'system_prompt': nlp_metrics.get('system_prompt', '')
+                }
+                
+                # ============================================================================
+                # CACHE STORAGE: Save results for repeated queries (0 token cost on cache hit)
+                # ============================================================================
+                st.session_state[cache_store_key] = {
+                    "generated_sql": generated_sql,
+                    "query_result": query_result,
+                    "schema_context": response.get("schema_context", ""),
+                    "phase2_result": phase2_result,
+                    "pipeline_metrics": pipeline_metrics,
+                    "natural_answer": natural_answer,
+                    "executive_summary": executive_summary,
+                    "nlp_metrics": nlp_metrics
+                }
+                
+                st.success("✅ Query Executed Successfully!")
             
             # Display metrics in a beautiful 4-column grid
             metric_col1, metric_col2, metric_col3, metric_col4 = st.columns(4, gap="small")
@@ -685,9 +1469,34 @@ if submit and question:
                 """, unsafe_allow_html=True)
             st.stop()  # Exit if error occurs
         # Display results only if query succeeded
-        result_tab1, result_tab2, result_tab3 = st.tabs(["💬  AI Insight", "🗃️  Raw Data", "💻  SQL Query"])
+        # ✅ ARCHITECTURAL TWEAK #1: Use abstract keys (bi_code, metric_name) for frontend simplicity
+        selected_tool = st.session_state.get("selected_bi_tool", "Power BI (DAX)")
+        
+        # Tab names differ, but response keys are ALWAYS abstract (bi_code, metric_name)
+        if selected_tool == "Power BI (DAX)":
+            tab_labels = ["💬  AI Insight", "🗃️  Raw Data", "💻  SQL Query", "📊 Power BI (DAX)"]
+        elif selected_tool == "Tableau (Calculated Fields)":
+            tab_labels = ["💬  AI Insight", "🗃️  Raw Data", "💻  SQL Query", "🔵 Tableau (Calculated Fields)"]
+        else:
+            tab_labels = ["💬  AI Insight", "🗃️  Raw Data", "💻  SQL Query", "❓ BI Code"]
+        
+        result_tab1, result_tab2, result_tab3, result_tab4 = st.tabs(tab_labels)
 
         with result_tab1:
+            # ============================================================================
+            # EXECUTIVE SUMMARY: Top-line business insight (NEW FEATURE)
+            # ============================================================================
+            if executive_summary:
+                st.markdown(f"""
+                <div style="background: linear-gradient(135deg, rgba(59, 130, 246, 0.1) 0%, rgba(129, 140, 248, 0.05) 100%);
+                            border-left: 4px solid #3b82f6; border-radius: 8px; padding: 1rem; margin-bottom: 1.5rem;">
+                    <div style="font-weight: 600; color: #1e40af; margin-bottom: 0.5rem;">📊 Executive Summary</div>
+                    <div style="color: #374151; font-size: 0.95rem; line-height: 1.6;">
+                        {executive_summary}
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
+            
             try:
                 # Extract and highlight key values directly from the LLM response
                 highlighted_answer = natural_answer
@@ -906,6 +1715,162 @@ if submit and question:
                     </ul>
                 </div>
             """, unsafe_allow_html=True)
+        
+        # ============================================================================
+        # TAB 4: BI CODE (DAX / Tableau Calculated Field)
+        # ============================================================================
+        with result_tab4:
+            if not success:
+                st.info("⏳ Awaiting valid SQL logic for translation.")
+            else:
+                selected_tool = st.session_state.get("selected_bi_tool", "Power BI (DAX)")
+                
+                # Retrieve generated SQL and schema context from Phase 1
+                generated_sql = st.session_state.get("generated_sql", "")
+                query_result = st.session_state.get("query_result", [])
+                schema_context = st.session_state.get("current_schema_context", "")
+                
+                if not generated_sql or not schema_context:
+                    st.warning("⚠️ Missing SQL or schema context from Phase 1. Please re-run the query.")
+                else:
+                    # Determine which BI tool to use
+                    if "Tableau" in selected_tool:
+                        # TABLEAU GENERATION
+                        with st.spinner("🔄 Generating Tableau calculated field..."):
+                            try:
+                                payload = {
+                                    "question": question,
+                                    "sql_query": generated_sql,
+                                    "schema_context": schema_context,
+                                    "sql_result_snapshot": str(query_result) if query_result else "",
+                                    "insight": ""
+                                }
+                                bi_response = requests.post(f"{API_BASE_URL}/tableau", json=payload, timeout=60)
+                                bi_data = bi_response.json()
+                                
+                                if not bi_response.ok:
+                                    st.error(f"❌ Tableau Generation Failed: {bi_data.get('detail', 'Unknown error')}")
+                                elif bi_data.get("success"):
+                                    st.markdown('<div class="sql-label">◈ Generated Tableau Field</div>', unsafe_allow_html=True)
+                                    st.code(bi_data["bi_code"], language="sql")
+                                    
+                                    if bi_data.get("metric_name"):
+                                        st.markdown("### 📋 Suggested Field Name")
+                                        st.code(bi_data["metric_name"], language="text")
+                                        st.caption(f"👉 Copy this name to paste into {selected_tool}")
+                                    
+                                    if bi_data.get("usage_note"):
+                                        st.caption(f"💡 {bi_data['usage_note']}")
+                                    
+                                    st.divider()
+                                    
+                                    # QA Status
+                                    st.markdown("### 🛡️ Data Integrity Report")
+                                    qa_status = bi_data.get("qa_status", "Verification Pending")
+                                    qa_passed = bi_data.get("qa_passed", False)
+                                    
+                                    if "Verification Pending" in qa_status or "disabled" in qa_status.lower():
+                                        st.info(f"ℹ️ {qa_status}")
+                                    elif qa_passed:
+                                        st.success(f"✅ Code Generated")
+                                    else:
+                                        st.info(f"ℹ️ {qa_status}")
+                                    
+                                    st.metric("Verification Latency", f"{bi_data.get('qa_time_ms', 0)}ms")
+                                    
+                                    st.divider()
+                                    
+                                    # Metrics
+                                    st.markdown("### 📊 Generation Metrics")
+                                    metric_cols = st.columns(4, gap="small")
+                                    with metric_cols[0]:
+                                        st.caption("**Gen Time**")
+                                        st.caption(f"{bi_data.get('generation_ms', 0)}ms")
+                                    with metric_cols[1]:
+                                        st.caption("**Prompt Tokens**")
+                                        st.caption(str(bi_data.get('tokens_prompt', 0)))
+                                    with metric_cols[2]:
+                                        st.caption("**Response Tokens**")
+                                        st.caption(str(bi_data.get('tokens_response', 0)))
+                                    with metric_cols[3]:
+                                        st.caption("**Status**")
+                                        st.caption("✅ Complete")
+                                else:
+                                    st.error(f"❌ Tableau Generation Failed: {bi_data.get('error', 'Unknown error')}")
+                            
+                            except requests.exceptions.Timeout:
+                                st.error("❌ Tableau generation timed out (exceeded 60 seconds)")
+                            except Exception as e:
+                                st.error(f"❌ Tableau API Error: {str(e)}")
+                    
+                    else:
+                        # DAX GENERATION (Default)
+                        with st.spinner("🔄 Generating Power BI DAX measure..."):
+                            try:
+                                payload = {
+                                    "question": question,
+                                    "sql_query": generated_sql,
+                                    "schema_context": schema_context,
+                                    "sql_result_snapshot": str(query_result) if query_result else "",
+                                    "insight": ""
+                                }
+                                bi_response = requests.post(f"{API_BASE_URL}/dax", json=payload, timeout=60)
+                                bi_data = bi_response.json()
+                                
+                                if not bi_response.ok:
+                                    st.error(f"❌ DAX Generation Failed: {bi_data.get('detail', 'Unknown error')}")
+                                elif bi_data.get("success"):
+                                    st.markdown('<div class="sql-label">◈ Generated DAX Measure</div>', unsafe_allow_html=True)
+                                    st.code(bi_data["bi_code"], language="dax")
+                                    
+                                    if bi_data.get("metric_name"):
+                                        st.markdown("### 📋 Suggested Measure Name")
+                                        st.code(bi_data["metric_name"], language="text")
+                                        st.caption(f"👉 Copy this name to paste into {selected_tool}")
+                                    
+                                    if bi_data.get("usage_note"):
+                                        st.caption(f"💡 {bi_data['usage_note']}")
+                                    
+                                    st.divider()
+                                    
+                                    # QA Status
+                                    st.markdown("### 🛡️ Data Integrity Report")
+                                    qa_status = bi_data.get("qa_status", "Verification Pending")
+                                    qa_passed = bi_data.get("qa_passed", False)
+                                    
+                                    if "Verification Pending" in qa_status or "disabled" in qa_status.lower():
+                                        st.info(f"ℹ️ {qa_status}")
+                                    elif qa_passed:
+                                        st.success(f"✅ Code Generated")
+                                    else:
+                                        st.info(f"ℹ️ {qa_status}")
+                                    
+                                    st.metric("Verification Latency", f"{bi_data.get('qa_time_ms', 0)}ms")
+                                    
+                                    st.divider()
+                                    
+                                    # Metrics
+                                    st.markdown("### 📊 Generation Metrics")
+                                    metric_cols = st.columns(4, gap="small")
+                                    with metric_cols[0]:
+                                        st.caption("**Gen Time**")
+                                        st.caption(f"{bi_data.get('generation_ms', 0)}ms")
+                                    with metric_cols[1]:
+                                        st.caption("**Prompt Tokens**")
+                                        st.caption(str(bi_data.get('tokens_prompt', 0)))
+                                    with metric_cols[2]:
+                                        st.caption("**Response Tokens**")
+                                        st.caption(str(bi_data.get('tokens_response', 0)))
+                                    with metric_cols[3]:
+                                        st.caption("**Status**")
+                                        st.caption("✅ Complete")
+                                else:
+                                    st.error(f"❌ DAX Generation Failed: {bi_data.get('error', 'Unknown error')}")
+                            
+                            except requests.exceptions.Timeout:
+                                st.error("❌ DAX generation timed out (exceeded 60 seconds)")
+                            except Exception as e:
+                                st.error(f"❌ DAX API Error: {str(e)}")
 
 elif submit and not question:
     st.error("🔴 **Empty Question**: Please enter a question before clicking Run Query.")

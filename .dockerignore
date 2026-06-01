@@ -1,0 +1,17 @@
+# Ignore virtual environments
+venv/
+.venv/
+env/
+
+# Ignore Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Ignore Git and environment variables
+.git/
+.env
+
+# Ignore local database volume data
+postgres_data/

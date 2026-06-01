@@ -1,0 +1,15 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# Copy requirements and project files
+COPY requirements.txt .
+COPY database/ ./database/
+COPY data/ ./data/
+COPY rag_pipeline/ ./rag_pipeline/
+
+# Install dependencies
+RUN pip install --no-cache-dir -q pandas sqlalchemy psycopg2-binary python-dotenv
+
+# Run the initialization script
+CMD ["python", "database/init_db.py"]
